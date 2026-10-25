@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header.tsx';
 import { LandingView } from './components/LandingView.tsx';
 import { PlayerSetupModal } from './components/PlayerSetupModal.tsx';
@@ -7,20 +7,13 @@ import { GameView } from './components/GameView.tsx';
 import { ResultModal } from './components/ResultModal.tsx';
 import { ConnectionBanner } from './components/ConnectionBanner.tsx';
 import {
-  isSupabaseConfigured,
+  multiplayer,
   getSavedPlayerName,
   savePlayerName,
   saveParticipantSession,
   getLastActiveSession,
   clearParticipantSession,
-  rpcCreateRoom,
-  rpcJoinRoom,
-  rpcMakeMove,
-  rpcRequestRematch,
-  rpcLeaveGame,
-  fetchAuthoritativeGame,
-  subscribeToGame,
-} from './lib/supabase.ts';
+} from './lib/multiplayer.ts';
 import { applyMove, handleRematch } from './lib/gameLogic.ts';
 import type { Game, ParticipantSession, ScoreBoard } from './types/game.ts';
 import { sounds } from './lib/sounds.ts';
@@ -38,18 +31,18 @@ export const App: React.FC = () => {
   const [lastMoveIndex, setLastMoveIndex] = useState<number | null>(null);
 
   // Network & UI state
-  const [realtimeStatus, setRealtimeStatus] = useState<string>('DISCONNECTED');
+  const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSubmittingMove, setIsSubmittingMove] = useState<boolean>(false);
   const [isRematchLoading, setIsRematchLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [initialRoomCode, setInitialRoomCode] = useState<string>('');
 
-  // Unsubscribe ref for realtime channel
-  const unsubscribeRef = useRef<(() => void) | null>(null);
   const prevGameRef = useRef<Game | null>(null);
+  const sessionRef = useRef<ParticipantSession | null>(null);
+  sessionRef.current = session;
 
-  // 1. Check URL parameters for room invitations (?room=XXXXXX) & restore previous session if any
+  // 1. Check URL parameters for room invitations (?room=XXXXXX) & Auto Reconnect
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
@@ -57,17 +50,48 @@ export const App: React.FC = () => {
       setInitialRoomCode(roomParam.trim().toUpperCase());
     }
 
-    // Auto-restore previous active session if page refreshed during game
-    const active = getLastActiveSession();
-    if (active && isSupabaseConfigured) {
-      fetchAuthoritativeGame(active.gameId).then(existingGame => {
-        if (existingGame && existingGame.status !== 'abandoned') {
-          setGame(existingGame);
-          setSession(active);
-          setupRealtimeSubscription(active.gameId);
+    // Connect to WebSocket server
+    multiplayer.connect().then(connected => {
+      setIsConnected(connected);
+
+      // Auto-restore previous active session if page refreshed during game
+      const active = getLastActiveSession();
+      if (active && connected) {
+        multiplayer.reconnectGame(active.gameId, active.sessionToken)
+          .then(res => {
+            if (res.game && res.game.status !== 'abandoned') {
+              setGame(res.game);
+              setSession(active);
+            }
+          })
+          .catch(() => {
+            clearParticipantSession(active.gameId);
+          });
+      }
+    });
+
+    const unsubConn = multiplayer.onConnectionChange(conn => {
+      setIsConnected(conn);
+    });
+
+    const unsubGame = multiplayer.onGameUpdate(updatedGame => {
+      setGame(prev => {
+        // Play sound if opponent made a move
+        if (prev && sessionRef.current) {
+          const didBoardChange = JSON.stringify(prev.board) !== JSON.stringify(updatedGame.board);
+          const isOpponentMove = prev.current_turn !== sessionRef.current.symbol;
+          if (didBoardChange && isOpponentMove) {
+            sounds.playMove();
+          }
         }
+        return updatedGame;
       });
-    }
+    });
+
+    return () => {
+      unsubConn();
+      unsubGame();
+    };
   }, []);
 
   // 2. Scoreboard calculation on game finish
@@ -84,55 +108,10 @@ export const App: React.FC = () => {
     prevGameRef.current = game;
   }, [game]);
 
-  // 3. Realtime Subscription Handler
-  const setupRealtimeSubscription = useCallback((gameId: string) => {
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current();
-      unsubscribeRef.current = null;
-    }
-
-    const unsub = subscribeToGame(
-      gameId,
-      (updatedGame: Game) => {
-        setGame(prev => {
-          // Play sound if opponent made a move
-          if (prev && session) {
-            const didBoardChange = JSON.stringify(prev.board) !== JSON.stringify(updatedGame.board);
-            const isOpponentMove = prev.current_turn !== session.symbol;
-            if (didBoardChange && isOpponentMove) {
-              sounds.playMove();
-            }
-          }
-          return updatedGame;
-        });
-      },
-      (status) => {
-        setRealtimeStatus(status);
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          // Attempt authoritative refresh
-          fetchAuthoritativeGame(gameId).then(fresh => {
-            if (fresh) setGame(fresh);
-          });
-        }
-      }
-    );
-
-    unsubscribeRef.current = unsub;
-  }, [session]);
-
-  // Cleanup on unmount
+  // Tab-to-tab fallback when server is not connected
   useEffect(() => {
-    return () => {
-      if (unsubscribeRef.current) {
-        unsubscribeRef.current();
-      }
-    };
-  }, []);
-
-  // Fallback broadcast channel for tab-to-tab testing when Supabase credentials are not yet configured
-  useEffect(() => {
-    if (!isSupabaseConfigured && game?.id) {
-      const channel = new BroadcastChannel(`duelgrid_mock_${game.id}`);
+    if (!isConnected && game?.id) {
+      const channel = new BroadcastChannel(`duelgrid_offline_${game.id}`);
       channel.onmessage = (event) => {
         const { type, payload } = event.data;
         if (type === 'GAME_UPDATE') {
@@ -143,7 +122,7 @@ export const App: React.FC = () => {
         channel.close();
       };
     }
-  }, [game?.id]);
+  }, [isConnected, game?.id]);
 
   // Save profile name
   const handleSaveProfile = (name: string) => {
@@ -151,7 +130,6 @@ export const App: React.FC = () => {
     savePlayerName(name);
     setShowProfileModal(false);
 
-    // If there was a pending create or join action, execute it
     if (pendingAction === 'create') {
       executeCreateRoom(name);
     } else if (pendingAction === 'join' && initialRoomCode) {
@@ -175,8 +153,8 @@ export const App: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      if (isSupabaseConfigured) {
-        const result = await rpcCreateRoom(name);
+      if (isConnected) {
+        const result = await multiplayer.createRoom(name);
         setGame(result.game);
         const newSession: ParticipantSession = {
           gameId: result.game.id,
@@ -187,11 +165,10 @@ export const App: React.FC = () => {
         };
         setSession(newSession);
         saveParticipantSession(newSession);
-        setupRealtimeSubscription(result.game.id);
       } else {
-        // Local preview fallback if credentials not yet supplied
+        // Standalone offline fallback
         const mockCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-        const mockId = `mock-${Date.now()}`;
+        const mockId = `local-${Date.now()}`;
         const mockGame: Game = {
           id: mockId,
           room_code: mockCode,
@@ -214,7 +191,7 @@ export const App: React.FC = () => {
           roomCode: mockCode,
           symbol: 'X',
           playerName: name,
-          sessionToken: `mock-token-${Date.now()}`,
+          sessionToken: `local-token-${Date.now()}`,
         };
         setGame(mockGame);
         setSession(mockSession);
@@ -243,8 +220,8 @@ export const App: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      if (isSupabaseConfigured) {
-        const result = await rpcJoinRoom(code, name);
+      if (isConnected) {
+        const result = await multiplayer.joinRoom(code, name);
         setGame(result.game);
         const newSession: ParticipantSession = {
           gameId: result.game.id,
@@ -255,9 +232,8 @@ export const App: React.FC = () => {
         };
         setSession(newSession);
         saveParticipantSession(newSession);
-        setupRealtimeSubscription(result.game.id);
       } else {
-        // Local preview join fallback
+        // Standalone offline fallback
         if (game && game.room_code === code) {
           const updated: Game = {
             ...game,
@@ -271,11 +247,11 @@ export const App: React.FC = () => {
             roomCode: code,
             symbol: 'O',
             playerName: name,
-            sessionToken: `mock-token-o-${Date.now()}`,
+            sessionToken: `local-token-o-${Date.now()}`,
           };
           setSession(mockSession);
         } else {
-          throw new Error('Room not found. Configure Supabase for cross-device multiplayer.');
+          throw new Error('Room not found on local tab. Start the DuelGrid server for online play.');
         }
       }
     } catch (err: unknown) {
@@ -294,14 +270,12 @@ export const App: React.FC = () => {
     setLastMoveIndex(cellIndex);
 
     try {
-      if (isSupabaseConfigured) {
-        const updatedGame = await rpcMakeMove(game.id, session.sessionToken, cellIndex);
-        setGame(updatedGame);
+      if (isConnected) {
+        await multiplayer.makeMove(game.id, session.sessionToken, cellIndex);
       } else {
-        // Apply locally
         const nextGame = applyMove(game, session.symbol, cellIndex);
         setGame(nextGame);
-        const channel = new BroadcastChannel(`duelgrid_mock_${game.id}`);
+        const channel = new BroadcastChannel(`duelgrid_offline_${game.id}`);
         channel.postMessage({ type: 'GAME_UPDATE', payload: nextGame });
         channel.close();
       }
@@ -319,13 +293,12 @@ export const App: React.FC = () => {
 
     setIsRematchLoading(true);
     try {
-      if (isSupabaseConfigured) {
-        const result = await rpcRequestRematch(game.id, session.sessionToken);
-        setGame(result.game);
+      if (isConnected) {
+        await multiplayer.requestRematch(game.id, session.sessionToken);
       } else {
         const result = handleRematch(game, session.symbol);
         setGame(result.game);
-        const channel = new BroadcastChannel(`duelgrid_mock_${game.id}`);
+        const channel = new BroadcastChannel(`duelgrid_offline_${game.id}`);
         channel.postMessage({ type: 'GAME_UPDATE', payload: result.game });
         channel.close();
       }
@@ -339,35 +312,29 @@ export const App: React.FC = () => {
 
   // Leave game handler
   const handleLeaveGame = async () => {
-    if (game && session && isSupabaseConfigured) {
-      try {
-        await rpcLeaveGame(game.id, session.sessionToken);
-      } catch {
-        // Ignore
-      }
+    if (game && session && isConnected) {
+      await multiplayer.leaveGame(game.id, session.sessionToken);
       clearParticipantSession(game.id);
-    }
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current();
-      unsubscribeRef.current = null;
     }
     setGame(null);
     setSession(null);
     setLastMoveIndex(null);
     setScores({ xWins: 0, oWins: 0, draws: 0 });
-    // Remove ?room= from url
     window.history.replaceState({}, document.title, window.location.pathname);
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-background text-slate-100">
-      {/* Network / Setup Notification Ribbon */}
-      <ConnectionBanner realtimeStatus={realtimeStatus} />
+      {/* Network Notification Ribbon */}
+      <ConnectionBanner
+        isConnected={isConnected}
+        onReconnect={() => multiplayer.connect()}
+      />
 
       {/* Main Header */}
       <Header
         roomCode={game?.room_code}
-        isConnected={isSupabaseConfigured ? realtimeStatus === 'SUBSCRIBED' : true}
+        isConnected={isConnected}
       />
 
       {/* Main Content Area */}
@@ -423,7 +390,7 @@ export const App: React.FC = () => {
 
       {/* Footer */}
       <footer className="w-full border-t border-surface-border py-4 text-center text-xs text-slate-500">
-        <p>DuelGrid • Production Real-Time Tic-Tac-Toe • Authoritative PostgreSQL</p>
+        <p>DuelGrid • Production Real-Time Tic-Tac-Toe • Authoritative WebSocket Engine</p>
       </footer>
 
       {/* Player Profile Modal */}
@@ -436,4 +403,5 @@ export const App: React.FC = () => {
     </div>
   );
 };
+
 export default App;

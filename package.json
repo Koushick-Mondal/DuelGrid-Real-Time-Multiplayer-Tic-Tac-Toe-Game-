@@ -4,8 +4,11 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k -n \"SERVER,CLIENT\" -c \"magenta,cyan\" \"npm run server\" \"npm run dev:client\"",
+    "dev:client": "vite --host --port 5173",
+    "server": "tsx server/index.ts",
     "build": "tsc && vite build",
+    "start": "tsx server/index.ts",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -13,10 +16,14 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
+    "@types/ws": "^8.18.2",
     "canvas-confetti": "^1.9.4",
+    "concurrently": "^10.0.6",
     "lucide-react": "^0.475.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tsx": "^4.23.15",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",

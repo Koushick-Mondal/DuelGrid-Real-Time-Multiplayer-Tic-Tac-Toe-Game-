@@ -160,15 +160,15 @@ export const LandingView: React.FC<LandingViewProps> = ({
           <div className="w-7 h-7 mx-auto mb-1.5 rounded-lg bg-surface flex items-center justify-center text-mint-400 border border-surface-border">
             <Zap className="w-3.5 h-3.5" />
           </div>
-          <p className="text-xs font-semibold text-slate-200">Supabase Realtime</p>
+          <p className="text-xs font-semibold text-slate-200">WebSocket Realtime</p>
           <p className="text-[11px] text-slate-500">Sub-second sync</p>
         </div>
         <div className="p-2">
           <div className="w-7 h-7 mx-auto mb-1.5 rounded-lg bg-surface flex items-center justify-center text-ice-400 border border-surface-border">
             <ShieldCheck className="w-3.5 h-3.5" />
           </div>
-          <p className="text-xs font-semibold text-slate-200">PostgreSQL RPC</p>
-          <p className="text-[11px] text-slate-500">Authoritative rules</p>
+          <p className="text-xs font-semibold text-slate-200">Authoritative Server</p>
+          <p className="text-[11px] text-slate-500">Enforced game rules</p>
         </div>
         <div className="p-2">
           <div className="w-7 h-7 mx-auto mb-1.5 rounded-lg bg-surface flex items-center justify-center text-rose-400 border border-surface-border">

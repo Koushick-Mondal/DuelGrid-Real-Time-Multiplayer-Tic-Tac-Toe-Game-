@@ -169,7 +169,7 @@ export const GameView: React.FC<GameViewProps> = ({
       {/* Footnote */}
       <div className="mt-6 flex items-center justify-center space-x-2 text-[11px] text-slate-500">
         <ShieldCheck className="w-3.5 h-3.5 text-mint-400" />
-        <span>Moves validated by authoritative backend RPC</span>
+        <span>Moves validated by authoritative server engine</span>
       </div>
 
       {/* Confirm Leave Modal */}
